@@ -1,57 +1,121 @@
 import numpy as np
 import pandas as pd
 import time
-from sklearn.model_selection import train_test_split
+import sys
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import RepeatedKFold
+from sklearn import svm
+from sklearn.linear_model import SGDClassifier, PassiveAggressiveClassifier, LogisticRegression
 from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import AdaBoostClassifier, RandomForestClassifier
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
+from sklearn.naive_bayes import GaussianNB
+from sklearn.utils import resample 
 from gensim.parsing.preprocessing import STOPWORDS
 from gensim.parsing.preprocessing import remove_stopwords
+sys.path.insert(0, '..')
+from assignment8.my_evaluation import my_evaluation
+
+
 
 class my_model():
     def fit(self, X, y):
         # do not exceed 29 mins
-        x_train, x_test, y_train, y_test = self.pre_process(X,y)
-        self.tree = DecisionTreeClassifier(X,y)
-        return
+        X = self.clean_all_data(X)
+        
+        self.preprocessor = TfidfVectorizer(stop_words='english', norm='l2', 
+                                            use_idf=True, smooth_idf=True, ngram_range=(1,5))
+        XX = self.preprocessor.fit_transform(X["description"], X["requirements"])
+        
+        
+        # RandomSearchCV grid on SGDClassifier
+        self.sgd = SGDClassifier()  
+        sgd_grid = {'class_weight' : ["balanced","weighted"],
+                    'penalty' : ["l2","l1"],
+                    'shuffle' : [True,False],
+                    'random_state': [10,20,5]
 
+        }
+
+        # RandomSearchCV grid on PassiveAggressiveClassifier
+        self.pac = PassiveAggressiveClassifier(class_weight="balanced")
+        pac_grid = {'random_state': [10,5,15,20],
+                    'C':[0.5,1,0.25,0.75],
+                    'shuffle':[True,False]
+        }
+        
+        # RandomSearchCV grid on RandomForestClassifier
+        self.rfc = RandomForestClassifier(class_weight="balanced",random_state=5)
+        rf_grid = {"max_depth": [10, 15, 25],
+                    "criterion": ['gini', 'entropy'],
+                    "min_samples_split": [2, 3, 4, 5],
+                     "n_estimators": [10]
+                    }
+        
+
+        self.rscv = RandomizedSearchCV(self.pac, pac_grid, random_state=20, n_jobs=-1)
+        self.rscv.fit(XX, y)
+        
+        return
+    
+    
     def predict(self, X):
         # remember to apply the same preprocessing in fit() on test data before making predictions
-        x_train, x_test, y_train, y_test = self.pre_process(X)
-        predictions = self.tree.predict(x_test)
+        X = self.clean_all_data(X)
+        XX = self.preprocessor.transform(X["description"])
+        
+        predictions = self.rscv.predict(XX)
         return predictions
+    
+    
+    def clean_all_data(self, data_frame):
+        #warnings.filterwarnings(action='ignore')
 
-    def pre_process(self, X, y):
-        pass
+        #fillna to location column
+        data_frame['location'] = data_frame.location.fillna('none')
 
-        return x_train, x_test, y_train, y_test
+        #fillna to description column
+        data_frame['description'] = data_frame.description.fillna('not specified')
 
-if __name__ == "__main__":
-    start = time.time()
-    # Load data
-    data = pd.read_csv("../data/job_train.csv")
-    # Replace missing values with empty strings
-    data = data.fillna("")
-    y = data["fraudulent"]
-    X = data.drop(['fraudulent'], axis=1)
-    # Train model
-    clf = my_model()
-    clf.fit(X, y)
-    runtime = (time.time() - start) / 60.0
-    print(runtime)
-    predictions = clf.predict(X)
-    print(predictions)
+        #fillna to requirements column
+        data_frame['requirements'] = data_frame.description.fillna('not specified')
+        
+        #drop unnecassary columns
+        data_frame.drop(['telecommuting','has_questions'],axis = 1, inplace = True)  
+        
+        #mapping fraudulent to T and F, where there is  0 and 1 respectively
+        data_frame['has_company_logo'] = data_frame.has_company_logo.map({1 : 't', 0 : 'f'})
+        
+        #remove any unnecassary web tags in the data set
+        data_frame['title'] = data_frame.title.str.replace(r'<[^>]*>', '')
+        data_frame['description'] = data_frame.description.str.replace(r'<[^>]*>', '')
+        data_frame['requirements'] = data_frame.requirements.str.replace(r'<[^>]*>', '')
+        
+        
+        # removing the characters in data set that are not words and has white spaces 
+        for column in data_frame.columns:
+            data_frame[column] = data_frame[column].str.replace(r'\W', ' ').str.replace(r'\s$','')
+            
+        
+        # mapping back the columns to original binary values
+        #data_frame['has_company_logo'] = data_frame.has_company_logo.map({'t': 1, 'f':0})
+        
+        self.all_genism_stop_words = STOPWORDS
+        
+        text_columns = list(data_frame.columns.values)
+        
+        for columns in text_columns:
+            self.remove_stopwords_from_data_train(data_frame,columns)
 
+        for columns in text_columns:
+            self.remove_special_chars(data_frame, columns)
+        
+        return data_frame
+    
+    def remove_stopwords_from_data_train(self,data_frame, column_name):
+        data_frame[column_name] = data_frame[column_name].apply(lambda x: " ".join([i for i in x.lower().split() if i not in self.all_genism_stop_words]))
 
-"""
-
-Hello Professor @azhe825,
-
-Can we make changes to the skeleton code provided for the project.py ?
-I was planning to add an __init__ method and it might take some parameters which would change the line
-`clf = my_model()`
-
-will this be alright ? or should we follow what is given ?
-
-Thanks
-Prajwal
-
-"""
+    def remove_special_chars(self, data_frame, columns):
+        data_frame.columns = data_frame.columns.str.replace('[!,@,#,$,%,^,&,*,\",:,;,.]','')
